@@ -6,6 +6,7 @@ from tapo_care_backup.monitor import (
     format_slack_message,
     load_env_file,
     load_state,
+    prepare_attachment_path,
     safe_output_path,
     save_state,
     settings_from_env,
@@ -87,6 +88,44 @@ def test_settings_from_env_falls_back_to_mark_seen_for_unknown_bootstrap(monkeyp
     monkeypatch.setenv("TAPO_WATCH_BOOTSTRAP", "typo")
 
     assert settings_from_env().bootstrap_mode == "mark_seen"
+
+
+def test_settings_from_env_defaults_to_mp4_attachments(monkeypatch):
+    monkeypatch.delenv("TAPO_WATCH_ATTACHMENT_FORMAT", raising=False)
+    assert settings_from_env().attachment_format == "mp4"
+
+    monkeypatch.setenv("TAPO_WATCH_ATTACHMENT_FORMAT", "source")
+    assert settings_from_env().attachment_format == "source"
+
+
+def test_prepare_attachment_path_remuxes_ts_to_mp4(tmp_path, monkeypatch):
+    source = tmp_path / "clip.ts"
+    source.write_bytes(b"ts")
+    calls = []
+
+    monkeypatch.setattr(monitor.shutil, "which", lambda name: "/usr/bin/ffmpeg" if name == "ffmpeg" else None)
+
+    def fake_run(cmd, check, timeout, stdin, stdout, stderr):
+        calls.append((cmd, check, timeout, stdin, stdout, stderr))
+        tmp = tmp_path / "clip.tmp.mp4"
+        tmp.write_bytes(b"mp4")
+
+    monkeypatch.setattr(monitor.subprocess, "run", fake_run)
+
+    result = prepare_attachment_path(source)
+
+    assert result == tmp_path / "clip.mp4"
+    assert result.read_bytes() == b"mp4"
+    assert calls and calls[0][0][0] == "/usr/bin/ffmpeg"
+    assert "-f" in calls[0][0] and calls[0][0][-2:] == ["mp4", str(tmp_path / "clip.tmp.mp4")]
+
+
+def test_prepare_attachment_path_falls_back_without_ffmpeg(tmp_path, monkeypatch):
+    source = tmp_path / "clip.ts"
+    source.write_bytes(b"ts")
+    monkeypatch.setattr(monitor.shutil, "which", lambda name: None)
+
+    assert prepare_attachment_path(source) == source
 
 
 def test_state_file_is_user_only(tmp_path):

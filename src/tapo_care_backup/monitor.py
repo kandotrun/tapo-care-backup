@@ -8,6 +8,8 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
+import subprocess
 from typing import Iterable, Mapping
 
 from .api import TapoApiError, TapoCareClient, TapoCloudClient, TapoDevice
@@ -34,6 +36,7 @@ class WatchSettings:
     page_size: int = 500
     max_attachments: int = 3
     bootstrap_mode: str = "mark_seen"
+    attachment_format: str = "mp4"
     device_id: str | None = None
 
 
@@ -90,12 +93,16 @@ def settings_from_env() -> WatchSettings:
     bootstrap_mode = os.environ.get("TAPO_WATCH_BOOTSTRAP", "mark_seen")
     if bootstrap_mode not in {"mark_seen", "download_existing"}:
         bootstrap_mode = "mark_seen"
+    attachment_format = os.environ.get("TAPO_WATCH_ATTACHMENT_FORMAT", "mp4").strip().lower()
+    if attachment_format not in {"mp4", "source"}:
+        attachment_format = "mp4"
     return WatchSettings(
         days=int(os.environ.get("TAPO_WATCH_DAYS", "1")),
         timezone_name=os.environ.get("TAPO_WATCH_TIMEZONE", "Asia/Tokyo"),
         page_size=int(os.environ.get("TAPO_WATCH_PAGE_SIZE", "500")),
         max_attachments=int(os.environ.get("TAPO_WATCH_MAX_ATTACHMENTS", "3")),
         bootstrap_mode=bootstrap_mode,
+        attachment_format=attachment_format,
         device_id=os.environ.get("TAPO_WATCH_DEVICE_ID") or None,
     )
 
@@ -182,6 +189,64 @@ def safe_output_path(output_dir: Path, relative_path: str) -> Path:
     return path
 
 
+def prepare_attachment_path(source_path: Path, attachment_format: str = "mp4") -> Path:
+    """Return a Slack/Hermes-friendly attachment path for a saved clip.
+
+    Tapo Care downloads are MPEG-TS (``.ts``). Hermes/Slack media extraction
+    only treats common video/document extensions as native attachments, so a raw
+    ``MEDIA:/path/file.ts`` can render as literal text. When ffmpeg is available,
+    remux the clip to sibling ``.mp4`` without re-encoding and use that path for
+    outbound notifications while keeping the original ``.ts`` backup intact.
+    """
+    if attachment_format != "mp4" or source_path.suffix.lower() != ".ts":
+        return source_path
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        return source_path
+
+    mp4_path = source_path.with_suffix(".mp4")
+    try:
+        if mp4_path.exists() and mp4_path.stat().st_mtime >= source_path.stat().st_mtime:
+            return mp4_path
+    except OSError:
+        return source_path
+
+    tmp_path = mp4_path.with_suffix(".tmp.mp4")
+    try:
+        subprocess.run(
+            [
+                ffmpeg,
+                "-nostdin",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-i",
+                str(source_path),
+                "-c",
+                "copy",
+                "-movflags",
+                "+faststart",
+                "-f",
+                "mp4",
+                str(tmp_path),
+            ],
+            check=True,
+            timeout=120,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+        tmp_path.replace(mp4_path)
+        return mp4_path
+    except Exception:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return source_path
+
+
 def run_watch_once(paths: WatchPaths | None = None, settings: WatchSettings | None = None) -> WatchResult | None:
     if paths is None:
         initial_paths = default_watch_paths()
@@ -235,6 +300,15 @@ def run_watch_once(paths: WatchPaths | None = None, settings: WatchSettings | No
             "size": out_path.stat().st_size if out_path.exists() else None,
         }
         saved.append(SavedClip(candidate.device_alias, candidate.event_local_time, out_path, clip_id))
+    if settings.attachment_format == "mp4" and settings.max_attachments > 0:
+        remuxed: list[SavedClip] = []
+        for index, clip in enumerate(saved):
+            if index < settings.max_attachments:
+                path = prepare_attachment_path(clip.path, settings.attachment_format)
+                remuxed.append(SavedClip(clip.device_alias, clip.event_local_time, path, clip.clip_id))
+            else:
+                remuxed.append(clip)
+        saved = remuxed
     state["bootstrapped"] = True
     save_state(paths.state_file, state)
     return WatchResult(bootstrapped=False, checked_candidates=len(candidates), saved=saved)
