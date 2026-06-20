@@ -25,7 +25,7 @@ def safe_name(value: str) -> str:
 def _event_path(device_alias: str, event_local_time: str, index: int) -> str:
     date_part = event_local_time[:10] if len(event_local_time) >= 10 else "unknown-date"
     time_part = event_local_time.replace(":", "-").replace(" ", "_") or "unknown-time"
-    return f"{safe_name(device_alias)}/{date_part}/{time_part}_{index}.mp4"
+    return f"{safe_name(device_alias)}/{date_part}/{time_part}_{index}.ts"
 
 
 def iter_download_candidates(payload: dict[str, Any], device_alias: str) -> Iterable[DownloadCandidate]:

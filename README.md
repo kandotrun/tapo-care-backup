@@ -7,7 +7,7 @@ This project was built as a safer, Kan-usable rewrite inspired by [`dimme/tapo-c
 1. Log in with your TP-Link ID.
 2. List Tapo camera devices.
 3. Query Tapo Care cloud video clips.
-4. Download MP4 files and decrypt AES-128-CBC payloads when Tapo returns a decryption key.
+4. Download MPEG-TS video streams and decrypt AES-128-CBC payloads when Tapo returns a decryption key.
 
 > This is not affiliated with TP-Link or Tapo. Tapo Care cloud-video endpoints are private/mobile-app endpoints and may change without notice.
 
@@ -16,7 +16,7 @@ This project was built as a safer, Kan-usable rewrite inspired by [`dimme/tapo-c
 - `login` — cache a TP-Link cloud token locally at `~/.config/tapo-care-backup/session.json` with `0600` permissions.
 - `devices` — list camera devices in the account.
 - `list` — list Tapo Care cloud video clips for a time window.
-- `download` — download clips into date/camera folders.
+- `download` — download clips into date/camera folders as `.ts` files.
 - `doctor` — unauthenticated endpoint probe; a `401 token invalid` response means the regional Tapo Care endpoint is reachable.
 
 ## Important constraints

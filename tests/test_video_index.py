@@ -22,9 +22,9 @@ def test_iter_download_candidates_handles_unencrypted_and_encrypted_videos():
     candidates = list(iter_download_candidates(payload, device_alias="Front Door"))
 
     assert candidates == [
-        DownloadCandidate("Front Door", "2026-06-20 12:34:56", "https://example.test/plain.mp4", None, "Front_Door/2026-06-20/2026-06-20_12-34-56_0.mp4"),
-        DownloadCandidate("Front Door", "2026-06-20 12:34:56", "https://example.test/encrypted.mp4", "ZmFrZS1rZXk=", "Front_Door/2026-06-20/2026-06-20_12-34-56_1.mp4"),
-        DownloadCandidate("Front Door", "2026-06-20 12:34:56", "https://example.test/no-method.mp4", None, "Front_Door/2026-06-20/2026-06-20_12-34-56_2.mp4"),
+        DownloadCandidate("Front Door", "2026-06-20 12:34:56", "https://example.test/plain.mp4", None, "Front_Door/2026-06-20/2026-06-20_12-34-56_0.ts"),
+        DownloadCandidate("Front Door", "2026-06-20 12:34:56", "https://example.test/encrypted.mp4", "ZmFrZS1rZXk=", "Front_Door/2026-06-20/2026-06-20_12-34-56_1.ts"),
+        DownloadCandidate("Front Door", "2026-06-20 12:34:56", "https://example.test/no-method.mp4", None, "Front_Door/2026-06-20/2026-06-20_12-34-56_2.ts"),
     ]
 
 
