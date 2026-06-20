@@ -16,7 +16,10 @@ dist/
 
 # Local runtime state
 .tapo-care-backup/
+monitor.env
 backups/
 downloads/
+TapoBackups/
 *.mp4
 *.m3u8
+*.ts

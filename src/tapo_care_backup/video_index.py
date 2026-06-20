@@ -19,13 +19,14 @@ class DownloadCandidate:
 
 
 def safe_name(value: str) -> str:
-    cleaned = _SAFE_CHARS.sub("_", value.strip()).strip("_")
+    cleaned = _SAFE_CHARS.sub("_", value.strip()).strip("._")
     return cleaned or "camera"
 
 
 def _event_path(device_alias: str, event_local_time: str, index: int, url: str) -> str:
-    date_part = event_local_time[:10] if len(event_local_time) >= 10 else "unknown-date"
-    time_part = event_local_time.replace(":", "-").replace(" ", "_") or "unknown-time"
+    date_part = safe_name(event_local_time[:10]).replace(".", "_").strip("_") if len(event_local_time) >= 10 else "unknown-date"
+    date_part = date_part or "unknown-date"
+    time_part = safe_name(event_local_time.replace(":", "-").replace(" ", "_")).replace(".", "_").strip("_") or "unknown-time"
     url_hash = hashlib.sha1(url.encode("utf-8")).hexdigest()[:10]
     return f"{safe_name(device_alias)}/{date_part}/{time_part}_{index}_{url_hash}.ts"
 

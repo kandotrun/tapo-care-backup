@@ -100,6 +100,35 @@ If device discovery is flaky but you know the camera `deviceId`:
 uv run tapo-care-backup download --device-id 'YOUR_DEVICE_ID' --days 7 --path ~/TapoBackups
 ```
 
+### 6. Monitor new clips every few minutes
+
+`scripts/tapo_care_watch.py` is a cron-friendly watcher. It stays silent when there are no new clips, downloads any newly-seen clips, and prints `MEDIA:/path/to/file.ts` lines so Hermes/Slack can attach a small number of new recordings.
+
+Create a local-only env file. Do **not** commit it:
+
+```bash
+mkdir -p ~/.config/tapo-care-backup
+chmod 700 ~/.config/tapo-care-backup
+cat > ~/.config/tapo-care-backup/monitor.env <<'EOF'
+TAPO_USERNAME=you@example.com
+TAPO_PASSWORD=your-password
+TAPO_WATCH_OUTPUT_DIR=/home/kan/TapoBackups
+TAPO_WATCH_DAYS=1
+TAPO_WATCH_TIMEZONE=Asia/Tokyo
+TAPO_WATCH_MAX_ATTACHMENTS=3
+TAPO_WATCH_BOOTSTRAP=mark_seen
+EOF
+chmod 600 ~/.config/tapo-care-backup/monitor.env
+```
+
+Run once manually:
+
+```bash
+uv run python scripts/tapo_care_watch.py
+```
+
+Default behavior is privacy-safe for first run: existing clips in the configured window are marked as already seen, and only future new clips are downloaded/shared.
+
 ## Signed auth mode
 
 Default login uses the older TP-Link cloud login flow because it does not require publishing Tapo mobile-app client keys.

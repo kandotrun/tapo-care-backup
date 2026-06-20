@@ -11,6 +11,7 @@ from .config import DEFAULT_CONFIG_PATH, load_session, save_session
 from .crypto import decrypt_tapo_payload
 from .time_window import build_time_window
 from .video_index import iter_download_candidates
+from .monitor import safe_output_path
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -106,7 +107,7 @@ def cmd_download(args: argparse.Namespace) -> int:
     for device_id, alias in devices:
         for payload in care.iter_video_pages(device_id, start, end, page_size=args.page_size):
             for candidate in iter_download_candidates(payload, alias):
-                out_path = args.path / candidate.relative_path
+                out_path = safe_output_path(args.path, candidate.relative_path)
                 if out_path.exists() and not args.overwrite:
                     skipped += 1
                     print(f"skip existing {out_path}")

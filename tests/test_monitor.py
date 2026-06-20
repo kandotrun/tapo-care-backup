@@ -1,0 +1,133 @@
+import pytest
+import tapo_care_backup.monitor as monitor
+from tapo_care_backup.monitor import (
+    SavedClip,
+    WatchResult,
+    format_slack_message,
+    load_env_file,
+    load_state,
+    safe_output_path,
+    save_state,
+    settings_from_env,
+    stable_clip_id,
+)
+from tapo_care_backup.video_index import DownloadCandidate, iter_download_candidates
+
+
+def test_load_env_file_handles_quotes_and_comments(tmp_path):
+    env_file = tmp_path / "monitor.env"
+    env_file.write_text("""
+# comment
+TAPO_USERNAME='kan@example.com'
+TAPO_PASSWORD=redacted
+OTHER=value
+BROKEN
+""".strip())
+
+    assert load_env_file(env_file) == {
+        "TAPO_USERNAME": "kan@example.com",
+        "TAPO_PASSWORD": "redacted",
+        "OTHER": "value",
+    }
+
+
+def test_stable_clip_id_ignores_temporary_url_hash_suffix():
+    a = DownloadCandidate("Front", "2026-06-20 12:34:56", "https://example.test/a?sig=1", None, "Front/2026-06-20/2026-06-20_12-34-56_0_aaaaaaaaaa.ts")
+    b = DownloadCandidate("Front", "2026-06-20 12:34:56", "https://example.test/a?sig=2", None, "Front/2026-06-20/2026-06-20_12-34-56_0_bbbbbbbbbb.ts")
+
+    assert stable_clip_id("device-1", a) == stable_clip_id("device-1", b)
+    assert stable_clip_id("device-2", a) != stable_clip_id("device-1", b)
+
+
+def test_candidate_paths_sanitize_api_derived_event_times():
+    payload = {"index": [{"eventLocalTime": "../../escape 12:34:56", "video": [{"uri": "https://example.test/a.ts"}]}]}
+
+    candidate = next(iter_download_candidates(payload, device_alias="../Front Door"))
+
+    assert ".." not in candidate.relative_path
+    assert candidate.relative_path.startswith("Front_Door/esca/escape_12-34-56_")
+
+
+def test_safe_output_path_rejects_traversal(tmp_path):
+    with pytest.raises(Exception):
+        safe_output_path(tmp_path, "../outside.ts")
+
+    assert safe_output_path(tmp_path, "cam/file.ts") == (tmp_path / "cam" / "file.ts").resolve()
+
+
+def test_run_watch_once_honors_path_settings_from_env_file(tmp_path, monkeypatch):
+    env_file = tmp_path / "monitor.env"
+    output_dir = tmp_path / "custom-output"
+    session_file = tmp_path / "custom-session.json"
+    state_file = tmp_path / "custom-state.json"
+    env_file.write_text(f"""
+TAPO_WATCH_OUTPUT_DIR={output_dir}
+TAPO_WATCH_SESSION={session_file}
+TAPO_WATCH_STATE={state_file}
+""".strip())
+    captured = {}
+
+    def fake_load_or_login_session(paths):
+        captured["paths"] = paths
+        return None
+
+    monkeypatch.setenv("TAPO_WATCH_ENV_FILE", str(env_file))
+    monkeypatch.delenv("TAPO_WATCH_OUTPUT_DIR", raising=False)
+    monkeypatch.delenv("TAPO_WATCH_SESSION", raising=False)
+    monkeypatch.delenv("TAPO_WATCH_STATE", raising=False)
+    monkeypatch.setattr(monitor, "load_or_login_session", fake_load_or_login_session)
+
+    assert monitor.run_watch_once() is None
+    assert captured["paths"].output_dir == output_dir
+    assert captured["paths"].session_file == session_file
+    assert captured["paths"].state_file == state_file
+
+
+def test_settings_from_env_falls_back_to_mark_seen_for_unknown_bootstrap(monkeypatch):
+    monkeypatch.setenv("TAPO_WATCH_BOOTSTRAP", "typo")
+
+    assert settings_from_env().bootstrap_mode == "mark_seen"
+
+
+def test_state_file_is_user_only(tmp_path):
+    state_path = tmp_path / "watch_state.json"
+    save_state(state_path, {"version": 1, "bootstrapped": True, "seen": {"x": {}}})
+
+    assert load_state(state_path)["bootstrapped"] is True
+    assert oct(state_path.stat().st_mode & 0o777) == "0o600"
+
+
+def test_format_slack_message_is_quiet_without_new_clips(tmp_path):
+    assert format_slack_message(WatchResult(False, 3, [])) == ""
+    assert format_slack_message(WatchResult(True, 3, [])) == ""
+
+
+def test_format_slack_message_can_notify_bootstrap_when_requested():
+    message = format_slack_message(WatchResult(True, 3, []), notify_bootstrap=True)
+
+    assert "既存3件" in message
+
+
+def test_format_slack_message_includes_limited_media_paths(tmp_path):
+    clips = [
+        (tmp_path / "one.ts"),
+        (tmp_path / "two.ts"),
+        (tmp_path / "three.ts"),
+    ]
+    result = WatchResult(
+        bootstrapped=False,
+        checked_candidates=3,
+        saved=[
+            SavedClip("cam", "2026-06-20 12:00:00", clips[0], "1"),
+            SavedClip("cam", "2026-06-20 12:05:00", clips[1], "2"),
+            SavedClip("cam", "2026-06-20 12:10:00", clips[2], "3"),
+        ],
+    )
+
+    message = format_slack_message(result, max_attachments=2)
+
+    assert "新規録画: 3件" in message
+    assert f"MEDIA:{clips[0]}" in message
+    assert f"MEDIA:{clips[1]}" in message
+    assert f"MEDIA:{clips[2]}" not in message
+    assert "ほか1件" in message
