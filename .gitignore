@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual envs / tooling
+.venv/
+.env
+.env.*
+
+# Build artifacts
+dist/
+
+# Local runtime state
+.tapo-care-backup/
+backups/
+downloads/
+*.mp4
+*.m3u8
