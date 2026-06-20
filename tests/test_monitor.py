@@ -2,7 +2,9 @@ import pytest
 import tapo_care_backup.monitor as monitor
 from tapo_care_backup.monitor import (
     SavedClip,
+    WatchPaths,
     WatchResult,
+    WatchSettings,
     format_slack_message,
     load_env_file,
     load_state,
@@ -98,6 +100,17 @@ def test_settings_from_env_defaults_to_mp4_attachments(monkeypatch):
     assert settings_from_env().attachment_format == "source"
 
 
+def test_settings_from_env_parses_person_notification_filter(monkeypatch):
+    monkeypatch.delenv("TAPO_WATCH_NOTIFY_EVENT_TYPES", raising=False)
+    assert settings_from_env().notify_event_types is None
+
+    monkeypatch.setenv("TAPO_WATCH_NOTIFY_EVENT_TYPES", "person, motion, PD")
+    assert settings_from_env().notify_event_types == ("PD", "MOTION")
+
+    monkeypatch.setenv("TAPO_WATCH_NOTIFY_EVENT_TYPES", "all")
+    assert settings_from_env().notify_event_types is None
+
+
 def test_prepare_attachment_path_remuxes_ts_to_mp4(tmp_path, monkeypatch):
     source = tmp_path / "clip.ts"
     source.write_bytes(b"ts")
@@ -170,3 +183,83 @@ def test_format_slack_message_includes_limited_media_paths(tmp_path):
     assert f"MEDIA:{clips[1]}" in message
     assert f"MEDIA:{clips[2]}" not in message
     assert "ほか1件" in message
+
+
+def test_format_slack_message_filters_non_notifiable_saved_clips(tmp_path):
+    motion = tmp_path / "motion.mp4"
+    person = tmp_path / "person.mp4"
+    result = WatchResult(
+        bootstrapped=False,
+        checked_candidates=2,
+        saved=[
+            SavedClip("cam", "2026-06-20 12:00:00", motion, "motion", ("MOTION",), False),
+            SavedClip("cam", "2026-06-20 12:01:00", person, "person", ("PD",), True),
+        ],
+        notification_filter=("PD",),
+    )
+
+    message = format_slack_message(result, max_attachments=20)
+
+    assert "人物検知録画: 1件" in message
+    assert person.name in message
+    assert f"MEDIA:{person}" in message
+    assert motion.name not in message
+    assert f"MEDIA:{motion}" not in message
+
+
+def test_run_watch_once_saves_all_new_clips_but_only_notifies_person(tmp_path, monkeypatch):
+    paths = WatchPaths(
+        env_file=tmp_path / "missing.env",
+        session_file=tmp_path / "session.json",
+        state_file=tmp_path / "state.json",
+        output_dir=tmp_path / "out",
+    )
+    settings = WatchSettings(
+        bootstrap_mode="download_existing",
+        attachment_format="source",
+        notify_event_types=("PD",),
+        max_attachments=20,
+    )
+    motion = DownloadCandidate(
+        "cam",
+        "2026-06-20 12:00:00",
+        "https://example.test/motion.ts",
+        None,
+        "cam/2026-06-20/motion.ts",
+        ("MOTION",),
+    )
+    person = DownloadCandidate(
+        "cam",
+        "2026-06-20 12:01:00",
+        "https://example.test/person.ts",
+        None,
+        "cam/2026-06-20/person.ts",
+        ("PD",),
+    )
+
+    class FakeCare:
+        def __init__(self, session):
+            pass
+
+        def download_bytes(self, url):
+            return url.encode()
+
+    monkeypatch.setattr(monitor, "load_or_login_session", lambda paths: object())
+    monkeypatch.setattr(monitor, "list_camera_devices", lambda session, paths: [monitor.TapoDevice("device-1", "cam", "SMART.IPCAMERA")])
+    monkeypatch.setattr(monitor, "iter_candidates_for_devices", lambda session, devices, settings: [("device-1", motion), ("device-1", person)])
+    monkeypatch.setattr(monitor, "TapoCareClient", FakeCare)
+
+    result = monitor.run_watch_once(paths, settings)
+
+    assert result is not None
+    assert [clip.path.name for clip in result.saved] == ["motion.ts", "person.ts"]
+    assert [clip.notify for clip in result.saved] == [False, True]
+    assert (paths.output_dir / motion.relative_path).exists()
+    assert (paths.output_dir / person.relative_path).exists()
+    state = load_state(paths.state_file)
+    assert len(state["seen"]) == 2
+    assert {tuple(item["event_types"]) for item in state["seen"].values()} == {("MOTION",), ("PD",)}
+
+    message = format_slack_message(result, max_attachments=20)
+    assert "person.ts" in message
+    assert "motion.ts" not in message

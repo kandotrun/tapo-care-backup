@@ -102,7 +102,7 @@ uv run tapo-care-backup download --device-id 'YOUR_DEVICE_ID' --days 7 --path ~/
 
 ### 6. Monitor new clips every few minutes
 
-`scripts/tapo_care_watch.py` is a cron-friendly watcher. It stays silent when there are no new clips, downloads any newly-seen clips as `.ts` backups, and prints `MEDIA:/path/to/file.mp4` lines so Hermes/Slack can attach a small number of new recordings. When `ffmpeg` is available, the watcher remuxes only the notification-bound clips to sibling `.mp4` files without re-encoding.
+`scripts/tapo_care_watch.py` is a cron-friendly watcher. It stays silent when there are no new clips, downloads any newly-seen clips as `.ts` backups, and prints `MEDIA:/path/to/file.mp4` lines so Hermes/Slack can attach a small number of new recordings. When `ffmpeg` is available, the watcher remuxes only the notification-bound clips to sibling `.mp4` files without re-encoding. Set `TAPO_WATCH_NOTIFY_EVENT_TYPES=person` (Tapo returns this as `PD`) to keep saving every new clip while sending Slack/Hermes notifications only for person-detection clips.
 
 Create a local-only env file. Do **not** commit it:
 
@@ -117,6 +117,7 @@ TAPO_WATCH_DAYS=1
 TAPO_WATCH_TIMEZONE=Asia/Tokyo
 TAPO_WATCH_MAX_ATTACHMENTS=3
 TAPO_WATCH_ATTACHMENT_FORMAT=mp4
+TAPO_WATCH_NOTIFY_EVENT_TYPES=person
 TAPO_WATCH_BOOTSTRAP=mark_seen
 EOF
 chmod 600 ~/.config/tapo-care-backup/monitor.env

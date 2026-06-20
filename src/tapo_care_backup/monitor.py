@@ -19,6 +19,19 @@ from .time_window import build_time_window
 from .video_index import DownloadCandidate, iter_download_candidates
 
 _URL_HASH_SUFFIX = re.compile(r"_[0-9a-f]{10}\.ts$")
+_EVENT_TYPE_ALIASES = {
+    "PERSON": "PD",
+    "PERSON_DETECTION": "PD",
+    "HUMAN": "PD",
+    "HUMAN_DETECTION": "PD",
+    "PEOPLE": "PD",
+    "人物": "PD",
+    "人": "PD",
+    "MOTION": "MOTION",
+    "MOTION_DETECTION": "MOTION",
+    "動体": "MOTION",
+}
+_EVENT_TYPE_LABELS = {"PD": "人物検知", "MOTION": "モーション"}
 
 
 @dataclass(frozen=True)
@@ -37,6 +50,7 @@ class WatchSettings:
     max_attachments: int = 3
     bootstrap_mode: str = "mark_seen"
     attachment_format: str = "mp4"
+    notify_event_types: tuple[str, ...] | None = None
     device_id: str | None = None
 
 
@@ -46,6 +60,8 @@ class SavedClip:
     event_local_time: str
     path: Path
     clip_id: str
+    event_types: tuple[str, ...] = ()
+    notify: bool = True
 
 
 @dataclass(frozen=True)
@@ -53,6 +69,7 @@ class WatchResult:
     bootstrapped: bool
     checked_candidates: int
     saved: list[SavedClip]
+    notification_filter: tuple[str, ...] | None = None
 
 
 def default_watch_paths() -> WatchPaths:
@@ -89,6 +106,36 @@ def apply_env_file(values: Mapping[str, str]) -> None:
             os.environ.setdefault(key, value)
 
 
+def normalize_event_type(value: str) -> str:
+    raw = value.strip()
+    folded = raw.upper().replace("-", "_").replace(" ", "_")
+    return _EVENT_TYPE_ALIASES.get(folded) or _EVENT_TYPE_ALIASES.get(raw) or folded
+
+
+def parse_notify_event_types(value: str | None) -> tuple[str, ...] | None:
+    if value is None or not value.strip():
+        return None
+    if value.strip().lower() in {"*", "all", "any"}:
+        return None
+    event_types: list[str] = []
+    seen: set[str] = set()
+    for part in re.split(r"[,\s]+", value):
+        if not part:
+            continue
+        event_type = normalize_event_type(part)
+        if event_type and event_type not in seen:
+            seen.add(event_type)
+            event_types.append(event_type)
+    return tuple(event_types) or None
+
+
+def should_notify_candidate(candidate: DownloadCandidate, notify_event_types: tuple[str, ...] | None) -> bool:
+    if notify_event_types is None:
+        return True
+    candidate_event_types = {normalize_event_type(event_type) for event_type in candidate.event_types}
+    return bool(candidate_event_types.intersection(notify_event_types))
+
+
 def settings_from_env() -> WatchSettings:
     bootstrap_mode = os.environ.get("TAPO_WATCH_BOOTSTRAP", "mark_seen")
     if bootstrap_mode not in {"mark_seen", "download_existing"}:
@@ -103,6 +150,7 @@ def settings_from_env() -> WatchSettings:
         max_attachments=int(os.environ.get("TAPO_WATCH_MAX_ATTACHMENTS", "3")),
         bootstrap_mode=bootstrap_mode,
         attachment_format=attachment_format,
+        notify_event_types=parse_notify_event_types(os.environ.get("TAPO_WATCH_NOTIFY_EVENT_TYPES")),
         device_id=os.environ.get("TAPO_WATCH_DEVICE_ID") or None,
     )
 
@@ -277,10 +325,18 @@ def run_watch_once(paths: WatchPaths | None = None, settings: WatchSettings | No
     if not state.get("bootstrapped") and settings.bootstrap_mode == "mark_seen":
         for device_id, candidate in candidates:
             clip_id = stable_clip_id(device_id, candidate)
-            seen.setdefault(clip_id, {"first_seen_at": now, "event_local_time": candidate.event_local_time})
+            seen.setdefault(
+                clip_id,
+                {
+                    "first_seen_at": now,
+                    "event_local_time": candidate.event_local_time,
+                    "event_types": list(candidate.event_types),
+                    "notify": should_notify_candidate(candidate, settings.notify_event_types),
+                },
+            )
         state["bootstrapped"] = True
         save_state(paths.state_file, state)
-        return WatchResult(bootstrapped=True, checked_candidates=len(candidates), saved=[])
+        return WatchResult(bootstrapped=True, checked_candidates=len(candidates), saved=[], notification_filter=settings.notify_event_types)
 
     saved: list[SavedClip] = []
     paths.output_dir.mkdir(parents=True, exist_ok=True)
@@ -293,25 +349,41 @@ def run_watch_once(paths: WatchPaths | None = None, settings: WatchSettings | No
         if not out_path.exists():
             content = TapoCareClient(session).download_bytes(candidate.url)
             out_path.write_bytes(decrypt_tapo_payload(content, candidate.key_b64))
+        should_notify = should_notify_candidate(candidate, settings.notify_event_types)
         seen[clip_id] = {
             "first_seen_at": now,
             "event_local_time": candidate.event_local_time,
+            "event_types": list(candidate.event_types),
+            "notify": should_notify,
             "relative_path": candidate.relative_path,
             "size": out_path.stat().st_size if out_path.exists() else None,
         }
-        saved.append(SavedClip(candidate.device_alias, candidate.event_local_time, out_path, clip_id))
+        saved.append(SavedClip(candidate.device_alias, candidate.event_local_time, out_path, clip_id, candidate.event_types, should_notify))
     if settings.attachment_format == "mp4" and settings.max_attachments > 0:
         remuxed: list[SavedClip] = []
-        for index, clip in enumerate(saved):
-            if index < settings.max_attachments:
+        attachment_count = 0
+        for clip in saved:
+            if clip.notify and attachment_count < settings.max_attachments:
                 path = prepare_attachment_path(clip.path, settings.attachment_format)
-                remuxed.append(SavedClip(clip.device_alias, clip.event_local_time, path, clip.clip_id))
+                remuxed.append(SavedClip(clip.device_alias, clip.event_local_time, path, clip.clip_id, clip.event_types, clip.notify))
+                attachment_count += 1
             else:
                 remuxed.append(clip)
         saved = remuxed
     state["bootstrapped"] = True
     save_state(paths.state_file, state)
-    return WatchResult(bootstrapped=False, checked_candidates=len(candidates), saved=saved)
+    return WatchResult(bootstrapped=False, checked_candidates=len(candidates), saved=saved, notification_filter=settings.notify_event_types)
+
+
+def _event_types_label(event_types: tuple[str, ...]) -> str:
+    labels = [_EVENT_TYPE_LABELS.get(normalize_event_type(event_type), event_type) for event_type in event_types]
+    return ",".join(labels)
+
+
+def _notification_header(result: WatchResult, notify_count: int) -> str:
+    if result.notification_filter == ("PD",):
+        return f"📹 Tapo Care人物検知録画: {notify_count}件保存しました。"
+    return f"📹 Tapo Care新規録画: {notify_count}件保存しました。"
 
 
 def format_slack_message(result: WatchResult, max_attachments: int = 3, notify_bootstrap: bool = False) -> str:
@@ -319,13 +391,16 @@ def format_slack_message(result: WatchResult, max_attachments: int = 3, notify_b
         if not notify_bootstrap:
             return ""
         return f"📹 Tapo Care監視を開始しました。既存{result.checked_candidates}件は既読扱いにして、次回以降の新規録画だけ保存・共有します。"
-    if not result.saved:
+    notify_clips = [clip for clip in result.saved if clip.notify]
+    if not notify_clips:
         return ""
-    lines = [f"📹 Tapo Care新規録画: {len(result.saved)}件保存しました。"]
-    for clip in result.saved[:max_attachments]:
-        lines.append(f"- {clip.event_local_time} / {clip.device_alias} / {clip.path.name}")
+    lines = [_notification_header(result, len(notify_clips))]
+    for clip in notify_clips[:max_attachments]:
+        event_label = _event_types_label(clip.event_types)
+        event_part = f" / {event_label}" if event_label else ""
+        lines.append(f"- {clip.event_local_time} / {clip.device_alias}{event_part} / {clip.path.name}")
         lines.append(f"MEDIA:{clip.path}")
-    remaining = len(result.saved) - max_attachments
+    remaining = len(notify_clips) - max_attachments
     if remaining > 0:
         lines.append(f"ほか{remaining}件はローカルに保存済みです。")
     return "\n".join(lines)

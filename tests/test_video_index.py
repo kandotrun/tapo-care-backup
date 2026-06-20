@@ -38,3 +38,23 @@ def test_iter_download_candidates_skips_items_without_uri():
     payload = {"index": [{"eventLocalTime": "2026-06-20 12:34:56", "video": [{"duration": 3}]}]}
 
     assert list(iter_download_candidates(payload, device_alias="cam")) == []
+
+
+def test_iter_download_candidates_extracts_event_types_from_tapo_metadata():
+    payload = {
+        "index": [
+            {
+                "eventLocalTime": "2026-06-20 12:34:56",
+                "eventTypeList": ["MOTION", "PD"],
+                "eventTypeInfos": [
+                    {"eventTypeName": "PD", "eventTimestamp": 1781950000000},
+                    {"eventTypeName": "MOTION", "eventTimestamp": 1781950000000},
+                ],
+                "video": [{"uri": "https://example.test/person.ts"}],
+            }
+        ]
+    }
+
+    candidate = next(iter_download_candidates(payload, device_alias="cam"))
+
+    assert candidate.event_types == ("MOTION", "PD")
