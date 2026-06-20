@@ -9,6 +9,7 @@ from tapo_care_backup.monitor import (
     load_env_file,
     load_state,
     prepare_attachment_path,
+    prepare_grid_attachment_path,
     safe_output_path,
     save_state,
     settings_from_env,
@@ -111,6 +112,20 @@ def test_settings_from_env_parses_person_notification_filter(monkeypatch):
     assert settings_from_env().notify_event_types is None
 
 
+def test_settings_from_env_parses_grid_attachment_flag(monkeypatch):
+    monkeypatch.delenv("TAPO_WATCH_GRID_ATTACHMENTS", raising=False)
+    assert settings_from_env().grid_attachments is False
+
+    monkeypatch.setenv("TAPO_WATCH_GRID_ATTACHMENTS", "1")
+    assert settings_from_env().grid_attachments is True
+
+    monkeypatch.setenv("TAPO_WATCH_GRID_TILE_WIDTH", "320")
+    monkeypatch.setenv("TAPO_WATCH_GRID_TILE_HEIGHT", "180")
+    settings = settings_from_env()
+    assert settings.grid_tile_width == 320
+    assert settings.grid_tile_height == 180
+
+
 def test_prepare_attachment_path_remuxes_ts_to_mp4(tmp_path, monkeypatch):
     source = tmp_path / "clip.ts"
     source.write_bytes(b"ts")
@@ -139,6 +154,46 @@ def test_prepare_attachment_path_falls_back_without_ffmpeg(tmp_path, monkeypatch
     monkeypatch.setattr(monitor.shutil, "which", lambda name: None)
 
     assert prepare_attachment_path(source) == source
+
+
+def test_prepare_grid_attachment_path_stacks_multiple_clips(tmp_path, monkeypatch):
+    one = tmp_path / "one.mp4"
+    two = tmp_path / "two.mp4"
+    one.write_bytes(b"one")
+    two.write_bytes(b"two")
+    clips = [
+        SavedClip("front", "2026-06-20 12:00:00", one, "clip-1", ("PD",), True),
+        SavedClip("side", "2026-06-20 12:01:00", two, "clip-2", ("PD",), True),
+    ]
+    calls = []
+
+    monkeypatch.setattr(monitor.shutil, "which", lambda name: "/usr/bin/ffmpeg" if name == "ffmpeg" else None)
+
+    def fake_run(cmd, check, timeout, stdin, stdout, stderr):
+        calls.append((cmd, check, timeout, stdin, stdout, stderr))
+        tmp_output = tmp_path / (cmd[-1].split("/")[-1])
+        tmp_output.write_bytes(b"grid")
+
+    monkeypatch.setattr(monitor.subprocess, "run", fake_run)
+
+    result = prepare_grid_attachment_path(clips, tile_width=320, tile_height=180)
+
+    assert result is not None
+    assert result.name.startswith("tapo_grid_2_")
+    assert result.suffix == ".mp4"
+    assert result.read_bytes() == b"grid"
+    cmd = calls[0][0]
+    assert cmd[:2] == ["/usr/bin/ffmpeg", "-nostdin"]
+    assert cmd.count("-i") == 2
+    assert "xstack=inputs=2:layout=0_0|320_0:fill=black:shortest=0[vout]" in cmd[cmd.index("-filter_complex") + 1]
+    assert "-an" in cmd
+    assert "libx264" in cmd
+
+
+def test_prepare_grid_attachment_path_falls_back_for_single_clip(tmp_path):
+    clip = SavedClip("front", "2026-06-20 12:00:00", tmp_path / "one.mp4", "clip-1", ("PD",), True)
+
+    assert prepare_grid_attachment_path([clip]) is None
 
 
 def test_state_file_is_user_only(tmp_path):
@@ -207,6 +262,31 @@ def test_format_slack_message_filters_non_notifiable_saved_clips(tmp_path):
     assert f"MEDIA:{motion}" not in message
 
 
+def test_format_slack_message_uses_one_grid_media_attachment_when_available(tmp_path):
+    one = tmp_path / "one.mp4"
+    two = tmp_path / "two.mp4"
+    grid = tmp_path / "grid.mp4"
+    result = WatchResult(
+        bootstrapped=False,
+        checked_candidates=2,
+        saved=[
+            SavedClip("front", "2026-06-20 12:00:00", one, "1", ("PD",), True),
+            SavedClip("side", "2026-06-20 12:01:00", two, "2", ("PD",), True),
+        ],
+        notification_filter=("PD",),
+        combined_attachment=grid,
+    )
+
+    message = format_slack_message(result, max_attachments=20)
+
+    assert message.count("MEDIA:") == 1
+    assert f"MEDIA:{grid}" in message
+    assert "one.mp4" in message
+    assert "two.mp4" in message
+    assert f"MEDIA:{one}" not in message
+    assert f"MEDIA:{two}" not in message
+
+
 def test_run_watch_once_saves_all_new_clips_but_only_notifies_person(tmp_path, monkeypatch):
     paths = WatchPaths(
         env_file=tmp_path / "missing.env",
@@ -263,3 +343,45 @@ def test_run_watch_once_saves_all_new_clips_but_only_notifies_person(tmp_path, m
     message = format_slack_message(result, max_attachments=20)
     assert "person.ts" in message
     assert "motion.ts" not in message
+
+
+def test_run_watch_once_combines_multiple_notified_clips_into_grid(tmp_path, monkeypatch):
+    paths = WatchPaths(
+        env_file=tmp_path / "missing.env",
+        session_file=tmp_path / "session.json",
+        state_file=tmp_path / "state.json",
+        output_dir=tmp_path / "out",
+    )
+    settings = WatchSettings(
+        bootstrap_mode="download_existing",
+        attachment_format="source",
+        notify_event_types=("PD",),
+        max_attachments=20,
+        grid_attachments=True,
+    )
+    first = DownloadCandidate("cam", "2026-06-20 12:01:00", "https://example.test/first.ts", None, "cam/2026-06-20/first.ts", ("PD",))
+    second = DownloadCandidate("cam", "2026-06-20 12:02:00", "https://example.test/second.ts", None, "cam/2026-06-20/second.ts", ("PD",))
+    grid = tmp_path / "grid.mp4"
+
+    class FakeCare:
+        def __init__(self, session):
+            pass
+
+        def download_bytes(self, url):
+            return url.encode()
+
+    monkeypatch.setattr(monitor, "load_or_login_session", lambda paths: object())
+    monkeypatch.setattr(monitor, "list_camera_devices", lambda session, paths: [monitor.TapoDevice("device-1", "cam", "SMART.IPCAMERA")])
+    monkeypatch.setattr(monitor, "iter_candidates_for_devices", lambda session, devices, settings: [("device-1", first), ("device-1", second)])
+    monkeypatch.setattr(monitor, "TapoCareClient", FakeCare)
+    monkeypatch.setattr(monitor, "prepare_grid_attachment_path", lambda clips, tile_width, tile_height: grid)
+
+    result = monitor.run_watch_once(paths, settings)
+
+    assert result is not None
+    assert result.combined_attachment == grid
+    message = format_slack_message(result, max_attachments=20)
+    assert message.count("MEDIA:") == 1
+    assert f"MEDIA:{grid}" in message
+    assert "first.ts" in message
+    assert "second.ts" in message

@@ -5,12 +5,13 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
 import shutil
 import subprocess
-from typing import Iterable, Mapping
+from typing import Iterable, Mapping, Sequence
 
 from .api import TapoApiError, TapoCareClient, TapoCloudClient, TapoDevice
 from .config import StoredSession, load_session, save_session
@@ -51,6 +52,9 @@ class WatchSettings:
     bootstrap_mode: str = "mark_seen"
     attachment_format: str = "mp4"
     notify_event_types: tuple[str, ...] | None = None
+    grid_attachments: bool = False
+    grid_tile_width: int = 480
+    grid_tile_height: int = 270
     device_id: str | None = None
 
 
@@ -70,6 +74,7 @@ class WatchResult:
     checked_candidates: int
     saved: list[SavedClip]
     notification_filter: tuple[str, ...] | None = None
+    combined_attachment: Path | None = None
 
 
 def default_watch_paths() -> WatchPaths:
@@ -136,6 +141,18 @@ def should_notify_candidate(candidate: DownloadCandidate, notify_event_types: tu
     return bool(candidate_event_types.intersection(notify_event_types))
 
 
+def _env_truthy(value: str | None) -> bool:
+    return bool(value and value.strip().lower() in {"1", "true", "yes", "on", "grid", "auto"})
+
+
+def _env_positive_int(name: str, default: int) -> int:
+    try:
+        value = int(os.environ.get(name, str(default)))
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
 def settings_from_env() -> WatchSettings:
     bootstrap_mode = os.environ.get("TAPO_WATCH_BOOTSTRAP", "mark_seen")
     if bootstrap_mode not in {"mark_seen", "download_existing"}:
@@ -151,6 +168,9 @@ def settings_from_env() -> WatchSettings:
         bootstrap_mode=bootstrap_mode,
         attachment_format=attachment_format,
         notify_event_types=parse_notify_event_types(os.environ.get("TAPO_WATCH_NOTIFY_EVENT_TYPES")),
+        grid_attachments=_env_truthy(os.environ.get("TAPO_WATCH_GRID_ATTACHMENTS")),
+        grid_tile_width=_env_positive_int("TAPO_WATCH_GRID_TILE_WIDTH", 480),
+        grid_tile_height=_env_positive_int("TAPO_WATCH_GRID_TILE_HEIGHT", 270),
         device_id=os.environ.get("TAPO_WATCH_DEVICE_ID") or None,
     )
 
@@ -295,6 +315,94 @@ def prepare_attachment_path(source_path: Path, attachment_format: str = "mp4") -
         return source_path
 
 
+def _grid_output_path(clips: Sequence[SavedClip]) -> Path:
+    material = "|".join([clip.clip_id for clip in clips] + [str(clip.path) for clip in clips])
+    digest = hashlib.sha1(material.encode("utf-8")).hexdigest()[:12]
+    return clips[0].path.parent / f"tapo_grid_{len(clips)}_{digest}.mp4"
+
+
+def _grid_filter(count: int, tile_width: int, tile_height: int) -> str:
+    columns = math.ceil(math.sqrt(count))
+    filters = [
+        f"[{index}:v]scale={tile_width}:{tile_height}:force_original_aspect_ratio=decrease,"
+        f"pad={tile_width}:{tile_height}:(ow-iw)/2:(oh-ih)/2:black,setsar=1,fps=15[v{index}]"
+        for index in range(count)
+    ]
+    layout = "|".join(f"{(index % columns) * tile_width}_{(index // columns) * tile_height}" for index in range(count))
+    stack_inputs = "".join(f"[v{index}]" for index in range(count))
+    filters.append(f"{stack_inputs}xstack=inputs={count}:layout={layout}:fill=black:shortest=0[vout]")
+    return ";".join(filters)
+
+
+def prepare_grid_attachment_path(clips: Sequence[SavedClip], tile_width: int = 480, tile_height: int = 270) -> Path | None:
+    """Create a single Slack-friendly MP4 grid for multiple notification clips.
+
+    The original per-camera backups remain untouched. The grid is a derived
+    notification artifact: video-only, H.264/yuv420p, and bounded to the first
+    notification clips already selected by ``TAPO_WATCH_MAX_ATTACHMENTS``.
+    """
+    if len(clips) < 2:
+        return None
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        return None
+    for clip in clips:
+        if not clip.path.exists():
+            return None
+
+    grid_path = _grid_output_path(clips)
+    try:
+        newest_input = max(clip.path.stat().st_mtime for clip in clips)
+        if grid_path.exists() and grid_path.stat().st_mtime >= newest_input:
+            return grid_path
+    except OSError:
+        return None
+
+    tmp_path = grid_path.with_suffix(".tmp.mp4")
+    cmd = [ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-y"]
+    for clip in clips:
+        cmd.extend(["-i", str(clip.path)])
+    cmd.extend(
+        [
+            "-filter_complex",
+            _grid_filter(len(clips), tile_width, tile_height),
+            "-map",
+            "[vout]",
+            "-an",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "28",
+            "-pix_fmt",
+            "yuv420p",
+            "-movflags",
+            "+faststart",
+            "-f",
+            "mp4",
+            str(tmp_path),
+        ]
+    )
+    try:
+        subprocess.run(
+            cmd,
+            check=True,
+            timeout=300,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        tmp_path.replace(grid_path)
+        return grid_path
+    except Exception:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return None
+
+
 def run_watch_once(paths: WatchPaths | None = None, settings: WatchSettings | None = None) -> WatchResult | None:
     if paths is None:
         initial_paths = default_watch_paths()
@@ -370,9 +478,19 @@ def run_watch_once(paths: WatchPaths | None = None, settings: WatchSettings | No
             else:
                 remuxed.append(clip)
         saved = remuxed
+    combined_attachment = None
+    if settings.grid_attachments and settings.max_attachments > 0:
+        grid_clips = [clip for clip in saved if clip.notify][: settings.max_attachments]
+        combined_attachment = prepare_grid_attachment_path(grid_clips, settings.grid_tile_width, settings.grid_tile_height)
     state["bootstrapped"] = True
     save_state(paths.state_file, state)
-    return WatchResult(bootstrapped=False, checked_candidates=len(candidates), saved=saved, notification_filter=settings.notify_event_types)
+    return WatchResult(
+        bootstrapped=False,
+        checked_candidates=len(candidates),
+        saved=saved,
+        notification_filter=settings.notify_event_types,
+        combined_attachment=combined_attachment,
+    )
 
 
 def _event_types_label(event_types: tuple[str, ...]) -> str:
@@ -395,12 +513,17 @@ def format_slack_message(result: WatchResult, max_attachments: int = 3, notify_b
     if not notify_clips:
         return ""
     lines = [_notification_header(result, len(notify_clips))]
-    for clip in notify_clips[:max_attachments]:
+    attachment_clips = notify_clips[:max_attachments]
+    for clip in attachment_clips:
         event_label = _event_types_label(clip.event_types)
         event_part = f" / {event_label}" if event_label else ""
         lines.append(f"- {clip.event_local_time} / {clip.device_alias}{event_part} / {clip.path.name}")
-        lines.append(f"MEDIA:{clip.path}")
     remaining = len(notify_clips) - max_attachments
     if remaining > 0:
         lines.append(f"ほか{remaining}件はローカルに保存済みです。")
+    if result.combined_attachment and len(attachment_clips) > 1:
+        lines.append(f"MEDIA:{result.combined_attachment}")
+    else:
+        for clip in attachment_clips:
+            lines.append(f"MEDIA:{clip.path}")
     return "\n".join(lines)
