@@ -16,7 +16,7 @@ This project was built as a safer, Kan-usable rewrite inspired by [`dimme/tapo-c
 - `login` — cache a TP-Link cloud token locally at `~/.config/tapo-care-backup/session.json` with `0600` permissions.
 - `devices` — list camera devices in the account.
 - `list` — list Tapo Care cloud video clips for a time window.
-- `download` — download clips into date/camera folders as `.ts` files.
+- `download` — paginate through all clips in the selected window and download them into date/camera folders as `.ts` files.
 - `doctor` — unauthenticated endpoint probe; a `401 token invalid` response means the regional Tapo Care endpoint is reachable.
 
 ## Important constraints

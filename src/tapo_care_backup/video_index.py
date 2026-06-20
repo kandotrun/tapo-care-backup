@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 import re
 from typing import Any, Iterable
 
@@ -22,10 +23,11 @@ def safe_name(value: str) -> str:
     return cleaned or "camera"
 
 
-def _event_path(device_alias: str, event_local_time: str, index: int) -> str:
+def _event_path(device_alias: str, event_local_time: str, index: int, url: str) -> str:
     date_part = event_local_time[:10] if len(event_local_time) >= 10 else "unknown-date"
     time_part = event_local_time.replace(":", "-").replace(" ", "_") or "unknown-time"
-    return f"{safe_name(device_alias)}/{date_part}/{time_part}_{index}.ts"
+    url_hash = hashlib.sha1(url.encode("utf-8")).hexdigest()[:10]
+    return f"{safe_name(device_alias)}/{date_part}/{time_part}_{index}_{url_hash}.ts"
 
 
 def iter_download_candidates(payload: dict[str, Any], device_alias: str) -> Iterable[DownloadCandidate]:
@@ -50,4 +52,4 @@ def iter_download_candidates(payload: dict[str, Any], device_alias: str) -> Iter
                 key_b64 = None
             else:
                 raise ValueError(f"Unsupported Tapo Care encryption method: {method}")
-            yield DownloadCandidate(device_alias, event_local_time, url, key_b64, _event_path(device_alias, event_local_time, idx))
+            yield DownloadCandidate(device_alias, event_local_time, url, key_b64, _event_path(device_alias, event_local_time, idx, url))

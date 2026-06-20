@@ -84,12 +84,14 @@ def cmd_list(args: argparse.Namespace) -> int:
     start, end = build_time_window(args.days, args.timezone)
     raw = {}
     for device_id, alias in devices:
-        payload = care.list_videos(device_id, start, end, page_size=args.page_size)
-        raw[device_id] = payload
+        pages = list(care.iter_video_pages(device_id, start, end, page_size=args.page_size))
+        raw[device_id] = pages
         if not args.json:
-            print(f"{alias}: {payload.get('total', 0)} videos")
-            for candidate in iter_download_candidates(payload, alias):
-                print(f"  {candidate.event_local_time}	{candidate.relative_path}	{candidate.url}")
+            total = pages[0].get("total", 0) if pages else 0
+            print(f"{alias}: {total} videos across {len(pages)} page(s)")
+            for payload in pages:
+                for candidate in iter_download_candidates(payload, alias):
+                    print(f"  {candidate.event_local_time}	{candidate.relative_path}	{candidate.url}")
     if args.json:
         print(json.dumps(raw, indent=2, ensure_ascii=False))
     return 0
@@ -102,18 +104,18 @@ def cmd_download(args: argparse.Namespace) -> int:
     downloaded = 0
     skipped = 0
     for device_id, alias in devices:
-        payload = care.list_videos(device_id, start, end, page_size=args.page_size)
-        for candidate in iter_download_candidates(payload, alias):
-            out_path = args.path / candidate.relative_path
-            if out_path.exists() and not args.overwrite:
-                skipped += 1
-                print(f"skip existing {out_path}")
-                continue
-            out_path.parent.mkdir(parents=True, exist_ok=True)
-            content = care.download_bytes(candidate.url)
-            out_path.write_bytes(decrypt_tapo_payload(content, candidate.key_b64))
-            downloaded += 1
-            print(f"downloaded {out_path}")
+        for payload in care.iter_video_pages(device_id, start, end, page_size=args.page_size):
+            for candidate in iter_download_candidates(payload, alias):
+                out_path = args.path / candidate.relative_path
+                if out_path.exists() and not args.overwrite:
+                    skipped += 1
+                    print(f"skip existing {out_path}")
+                    continue
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                content = care.download_bytes(candidate.url)
+                out_path.write_bytes(decrypt_tapo_payload(content, candidate.key_b64))
+                downloaded += 1
+                print(f"downloaded {out_path}")
     print(f"done: downloaded={downloaded} skipped={skipped}")
     return 0
 

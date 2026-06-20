@@ -277,6 +277,31 @@ class TapoCareClient:
             response = self.http.get(f"{base}/v1/videos", params=params, headers=headers, timeout=30, verify=self.verify_tls)
             return _check_tapo_care_response(response)
 
+    def iter_video_pages(
+        self,
+        device_id: str,
+        start_time: str | None = None,
+        end_time: str | None = None,
+        page_size: int = 3000,
+        order: str = "desc",
+    ):
+        """Yield every Tapo Care video-list page until the API total is exhausted."""
+        seen = 0
+        page = 0
+        while True:
+            payload = self.list_videos(device_id, start_time, end_time, page=page, page_size=page_size, order=order)
+            index = payload.get("index") or []
+            yield payload
+            seen += len(index)
+            total = payload.get("total")
+            if not index:
+                break
+            if isinstance(total, int) and seen >= total:
+                break
+            if len(index) < page_size and not isinstance(total, int):
+                break
+            page += 1
+
     def download_bytes(self, url: str) -> bytes:
         response = self.http.get(url, timeout=120)
         response.raise_for_status()

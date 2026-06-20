@@ -38,6 +38,22 @@ def test_tapo_care_list_videos_uses_regional_v2_endpoint_and_auth_header(request
     assert matcher.last_request.qs["deviceid"] == ["device-1"]
 
 
+def test_tapo_care_iter_video_pages_until_total_is_seen(requests_mock):
+    session = StoredSession(token="tok_123", email="kan@example.com", region="aps1")
+    matcher = requests_mock.get(
+        "https://aps1-app-tapo-care.i.tplinknbu.com/v2/videos/list",
+        [
+            {"json": {"total": 3, "index": [{"eventLocalTime": "a"}, {"eventLocalTime": "b"}]}},
+            {"json": {"total": 3, "index": [{"eventLocalTime": "c"}]}},
+        ],
+    )
+
+    pages = list(TapoCareClient(session).iter_video_pages("device-1", page_size=2))
+
+    assert [len(page["index"]) for page in pages] == [2, 1]
+    assert [request.qs["page"] for request in matcher.request_history] == [["0"], ["1"]]
+
+
 def test_list_devices_falls_back_to_signed_endpoint_when_legacy_token_is_rejected(requests_mock, monkeypatch):
     monkeypatch.setenv("TAPO_CLIENT_ACCESS_KEY", "access-key")
     monkeypatch.setenv("TAPO_CLIENT_SECRET", "client-secret")
