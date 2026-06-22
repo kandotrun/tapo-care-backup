@@ -241,6 +241,11 @@ def _login_refresh(paths: WatchPaths) -> StoredSession:
     return session
 
 
+def is_recording_device(device: TapoDevice) -> bool:
+    device_type = device.device_type.upper()
+    return device.device_type == "SMART.IPCAMERA" or "CAMERA" in device_type or "DOORBELL" in device_type
+
+
 def list_camera_devices(session: StoredSession, paths: WatchPaths) -> list[TapoDevice]:
     cloud = TapoCloudClient()
     try:
@@ -248,7 +253,7 @@ def list_camera_devices(session: StoredSession, paths: WatchPaths) -> list[TapoD
     except TapoApiError:
         session = _login_refresh(paths)
         devices = cloud.list_devices(session)
-    return [d for d in devices if d.device_type == "SMART.IPCAMERA" or "CAMERA" in d.device_type.upper()]
+    return [d for d in devices if is_recording_device(d)]
 
 
 def iter_candidates_for_devices(session: StoredSession, devices: Iterable[TapoDevice], settings: WatchSettings):

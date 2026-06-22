@@ -206,6 +206,25 @@ def test_prepare_grid_attachment_path_falls_back_for_single_clip(tmp_path):
     assert prepare_grid_attachment_path([clip]) is None
 
 
+def test_list_camera_devices_includes_tapo_doorbells(monkeypatch, tmp_path):
+    devices = [
+        monitor.TapoDevice("camera-1", "camera", "SMART.IPCAMERA", "C210"),
+        monitor.TapoDevice("doorbell-1", "intercom", "SMART.TAPODOORBELL", "D205"),
+        monitor.TapoDevice("plug-1", "plug", "SMART.TAPOPLUG", "P110M"),
+    ]
+
+    class FakeCloud:
+        def list_devices(self, session):
+            return devices
+
+    monkeypatch.setattr(monitor, "TapoCloudClient", lambda: FakeCloud())
+    paths = WatchPaths(tmp_path / "env", tmp_path / "session", tmp_path / "state", tmp_path / "out")
+
+    result = monitor.list_camera_devices(monitor.StoredSession("token", "user@example.test", "aps1"), paths)
+
+    assert [device.alias for device in result] == ["camera", "intercom"]
+
+
 def test_state_file_is_user_only(tmp_path):
     state_path = tmp_path / "watch_state.json"
     save_state(state_path, {"version": 1, "bootstrapped": True, "seen": {"x": {}}})
