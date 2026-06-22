@@ -102,7 +102,7 @@ uv run tapo-care-backup download --device-id 'YOUR_DEVICE_ID' --days 7 --path ~/
 
 ### 6. Monitor new clips every few minutes
 
-`scripts/tapo_care_watch.py` is a cron-friendly watcher. It stays silent when there are no new clips, downloads any newly-seen clips as `.ts` backups, and prints `MEDIA:/path/to/file.mp4` lines so Hermes/Slack can attach new recordings. When `ffmpeg` is available, the watcher remuxes only the notification-bound clips to sibling `.mp4` files without re-encoding. Set `TAPO_WATCH_NOTIFY_EVENT_TYPES=person` (Tapo returns this as `PD`) to keep saving every new clip while sending Slack/Hermes notifications only for person-detection clips. Set `TAPO_WATCH_GRID_ATTACHMENTS=1` to combine multiple notification-bound clips into one grid MP4 attachment instead of sending separate videos.
+`scripts/tapo_care_watch.py` is a cron-friendly watcher. It stays silent when there are no new clips, downloads any newly-seen clips as `.ts` backups, and prints `MEDIA:/path/to/file.mp4` lines so Hermes/Slack can attach new recordings. When `ffmpeg` is available, the watcher remuxes only the notification-bound clips to sibling `.mp4` files without re-encoding. Set `TAPO_WATCH_NOTIFY_EVENT_TYPES=person` (Tapo returns this as `PD`) to keep saving every new clip while sending Slack/Hermes notifications only for person-detection clips. Set `TAPO_WATCH_GRID_ATTACHMENTS=1` to combine multiple clips into one grid MP4 attachment and notify all event categories, even if a legacy person-only filter is still present in the env file.
 
 Create a local-only env file. Do **not** commit it:
 
@@ -117,7 +117,7 @@ TAPO_WATCH_DAYS=1
 TAPO_WATCH_TIMEZONE=Asia/Tokyo
 TAPO_WATCH_MAX_ATTACHMENTS=3
 TAPO_WATCH_ATTACHMENT_FORMAT=mp4
-TAPO_WATCH_NOTIFY_EVENT_TYPES=person
+TAPO_WATCH_NOTIFY_EVENT_TYPES=all
 TAPO_WATCH_GRID_ATTACHMENTS=1
 TAPO_WATCH_GRID_TILE_WIDTH=480
 TAPO_WATCH_GRID_TILE_HEIGHT=270

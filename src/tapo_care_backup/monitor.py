@@ -153,6 +153,17 @@ def _env_positive_int(name: str, default: int) -> int:
     return value if value > 0 else default
 
 
+def effective_notify_event_types(settings: WatchSettings) -> tuple[str, ...] | None:
+    """Return outbound notification filter after mode-level overrides.
+
+    Grid mode is intended as a compact review surface, so it sends all event
+    categories even if a legacy person-only filter remains in the local env file.
+    """
+    if settings.grid_attachments:
+        return None
+    return settings.notify_event_types
+
+
 def settings_from_env() -> WatchSettings:
     bootstrap_mode = os.environ.get("TAPO_WATCH_BOOTSTRAP", "mark_seen")
     if bootstrap_mode not in {"mark_seen", "download_existing"}:
@@ -160,6 +171,8 @@ def settings_from_env() -> WatchSettings:
     attachment_format = os.environ.get("TAPO_WATCH_ATTACHMENT_FORMAT", "mp4").strip().lower()
     if attachment_format not in {"mp4", "source"}:
         attachment_format = "mp4"
+    grid_attachments = _env_truthy(os.environ.get("TAPO_WATCH_GRID_ATTACHMENTS"))
+    notify_event_types = None if grid_attachments else parse_notify_event_types(os.environ.get("TAPO_WATCH_NOTIFY_EVENT_TYPES"))
     return WatchSettings(
         days=int(os.environ.get("TAPO_WATCH_DAYS", "1")),
         timezone_name=os.environ.get("TAPO_WATCH_TIMEZONE", "Asia/Tokyo"),
@@ -167,8 +180,8 @@ def settings_from_env() -> WatchSettings:
         max_attachments=int(os.environ.get("TAPO_WATCH_MAX_ATTACHMENTS", "3")),
         bootstrap_mode=bootstrap_mode,
         attachment_format=attachment_format,
-        notify_event_types=parse_notify_event_types(os.environ.get("TAPO_WATCH_NOTIFY_EVENT_TYPES")),
-        grid_attachments=_env_truthy(os.environ.get("TAPO_WATCH_GRID_ATTACHMENTS")),
+        notify_event_types=notify_event_types,
+        grid_attachments=grid_attachments,
         grid_tile_width=_env_positive_int("TAPO_WATCH_GRID_TILE_WIDTH", 480),
         grid_tile_height=_env_positive_int("TAPO_WATCH_GRID_TILE_HEIGHT", 270),
         device_id=os.environ.get("TAPO_WATCH_DEVICE_ID") or None,
@@ -411,6 +424,7 @@ def run_watch_once(paths: WatchPaths | None = None, settings: WatchSettings | No
     else:
         apply_env_file(load_env_file(paths.env_file))
     settings = settings or settings_from_env()
+    notification_filter = effective_notify_event_types(settings)
 
     session = load_or_login_session(paths)
     if session is None:
@@ -439,12 +453,12 @@ def run_watch_once(paths: WatchPaths | None = None, settings: WatchSettings | No
                     "first_seen_at": now,
                     "event_local_time": candidate.event_local_time,
                     "event_types": list(candidate.event_types),
-                    "notify": should_notify_candidate(candidate, settings.notify_event_types),
+                    "notify": should_notify_candidate(candidate, notification_filter),
                 },
             )
         state["bootstrapped"] = True
         save_state(paths.state_file, state)
-        return WatchResult(bootstrapped=True, checked_candidates=len(candidates), saved=[], notification_filter=settings.notify_event_types)
+        return WatchResult(bootstrapped=True, checked_candidates=len(candidates), saved=[], notification_filter=notification_filter)
 
     saved: list[SavedClip] = []
     paths.output_dir.mkdir(parents=True, exist_ok=True)
@@ -457,7 +471,7 @@ def run_watch_once(paths: WatchPaths | None = None, settings: WatchSettings | No
         if not out_path.exists():
             content = TapoCareClient(session).download_bytes(candidate.url)
             out_path.write_bytes(decrypt_tapo_payload(content, candidate.key_b64))
-        should_notify = should_notify_candidate(candidate, settings.notify_event_types)
+        should_notify = should_notify_candidate(candidate, notification_filter)
         seen[clip_id] = {
             "first_seen_at": now,
             "event_local_time": candidate.event_local_time,
@@ -488,7 +502,7 @@ def run_watch_once(paths: WatchPaths | None = None, settings: WatchSettings | No
         bootstrapped=False,
         checked_candidates=len(candidates),
         saved=saved,
-        notification_filter=settings.notify_event_types,
+        notification_filter=notification_filter,
         combined_attachment=combined_attachment,
     )
 

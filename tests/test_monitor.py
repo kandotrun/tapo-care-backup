@@ -126,6 +126,16 @@ def test_settings_from_env_parses_grid_attachment_flag(monkeypatch):
     assert settings.grid_tile_height == 180
 
 
+def test_settings_from_env_grid_mode_notifies_all_even_with_person_filter(monkeypatch):
+    monkeypatch.setenv("TAPO_WATCH_GRID_ATTACHMENTS", "1")
+    monkeypatch.setenv("TAPO_WATCH_NOTIFY_EVENT_TYPES", "person")
+
+    settings = settings_from_env()
+
+    assert settings.grid_attachments is True
+    assert settings.notify_event_types is None
+
+
 def test_prepare_attachment_path_remuxes_ts_to_mp4(tmp_path, monkeypatch):
     source = tmp_path / "clip.ts"
     source.write_bytes(b"ts")
@@ -359,9 +369,10 @@ def test_run_watch_once_combines_multiple_notified_clips_into_grid(tmp_path, mon
         max_attachments=20,
         grid_attachments=True,
     )
-    first = DownloadCandidate("cam", "2026-06-20 12:01:00", "https://example.test/first.ts", None, "cam/2026-06-20/first.ts", ("PD",))
+    first = DownloadCandidate("cam", "2026-06-20 12:01:00", "https://example.test/first.ts", None, "cam/2026-06-20/first.ts", ("MOTION",))
     second = DownloadCandidate("cam", "2026-06-20 12:02:00", "https://example.test/second.ts", None, "cam/2026-06-20/second.ts", ("PD",))
     grid = tmp_path / "grid.mp4"
+    captured = {}
 
     class FakeCare:
         def __init__(self, session):
@@ -374,13 +385,23 @@ def test_run_watch_once_combines_multiple_notified_clips_into_grid(tmp_path, mon
     monkeypatch.setattr(monitor, "list_camera_devices", lambda session, paths: [monitor.TapoDevice("device-1", "cam", "SMART.IPCAMERA")])
     monkeypatch.setattr(monitor, "iter_candidates_for_devices", lambda session, devices, settings: [("device-1", first), ("device-1", second)])
     monkeypatch.setattr(monitor, "TapoCareClient", FakeCare)
-    monkeypatch.setattr(monitor, "prepare_grid_attachment_path", lambda clips, tile_width, tile_height: grid)
+
+    def fake_grid(clips, tile_width, tile_height):
+        captured["grid_clips"] = clips
+        return grid
+
+    monkeypatch.setattr(monitor, "prepare_grid_attachment_path", fake_grid)
 
     result = monitor.run_watch_once(paths, settings)
 
     assert result is not None
+    assert result.notification_filter is None
+    assert [clip.notify for clip in result.saved] == [True, True]
+    assert [clip.path.name for clip in captured["grid_clips"]] == ["first.ts", "second.ts"]
     assert result.combined_attachment == grid
     message = format_slack_message(result, max_attachments=20)
+    assert "Tapo Care新規録画: 2件" in message
+    assert "モーション" in message
     assert message.count("MEDIA:") == 1
     assert f"MEDIA:{grid}" in message
     assert "first.ts" in message
