@@ -28,6 +28,29 @@ class TapoApiError(RuntimeError):
     """Raised for TP-Link/Tapo API errors."""
 
 
+TRANSIENT_REQUEST_ERRORS = (
+    requests.exceptions.ConnectTimeout,
+    requests.exceptions.ReadTimeout,
+    requests.exceptions.Timeout,
+    requests.exceptions.ConnectionError,
+)
+
+
+def _request_with_retries(send: Callable[[], requests.Response], attempts: int = 3, base_delay: float = 1.0) -> requests.Response:
+    """Run a requests call with bounded retries for transient network failures."""
+    last_error: requests.exceptions.RequestException | None = None
+    for attempt in range(attempts):
+        try:
+            return send()
+        except TRANSIENT_REQUEST_ERRORS as exc:
+            last_error = exc
+            if attempt < attempts - 1:
+                time.sleep(base_delay * (2**attempt))
+    if last_error is not None:
+        raise last_error
+    raise TapoApiError("request retry helper exhausted without an error")
+
+
 @dataclass(frozen=True)
 class TapoDevice:
     device_id: str
@@ -82,7 +105,7 @@ class TapoCloudClient:
                 "terminalUUID": terminal_uuid or uuid.uuid4().hex,
             },
         }
-        response = self.http.post(LEGACY_CLOUD_URL, json=request, timeout=30, verify=self.verify_tls)
+        response = _request_with_retries(lambda: self.http.post(LEGACY_CLOUD_URL, json=request, timeout=30, verify=self.verify_tls))
         result = _check_legacy_response(response.json())
         app_url = result.get("appServerUrl") or result.get("app_server_url")
         return StoredSession(
@@ -157,13 +180,15 @@ class TapoCloudClient:
         base_url: str = SIGNED_CLOUD_URL,
         params: dict[str, str] | None = None,
     ) -> requests.Response:
-        return self.http.post(
-            f"{base_url}{endpoint}",
-            data=content,
-            headers=self._signed_headers(endpoint, content, access_key, client_secret),
-            params=params,
-            timeout=30,
-            verify=False,
+        return _request_with_retries(
+            lambda: self.http.post(
+                f"{base_url}{endpoint}",
+                data=content,
+                headers=self._signed_headers(endpoint, content, access_key, client_secret),
+                params=params,
+                timeout=30,
+                verify=False,
+            )
         )
 
     def _request_mfa_code(self, email: str, password: str, terminal_uuid: str, access_key: str, client_secret: str) -> None:
@@ -196,7 +221,7 @@ class TapoCloudClient:
 
     def _list_devices_legacy(self, session: StoredSession) -> list[TapoDevice]:
         request = {"method": "getDeviceList"}
-        response = self.http.post(LEGACY_CLOUD_URL, json=request, params={"token": session.token}, timeout=30, verify=self.verify_tls)
+        response = _request_with_retries(lambda: self.http.post(LEGACY_CLOUD_URL, json=request, params={"token": session.token}, timeout=30, verify=self.verify_tls))
         result = _check_legacy_response(response.json())
         return [_device_from_payload(item) for item in result.get("deviceList", [])]
 
@@ -269,12 +294,12 @@ class TapoCareClient:
         params = {k: v for k, v in params.items() if v is not None}
         headers = {"Authorization": f"ut|{self.session.token}", "X-App-Name": APP_TYPE_SIGNED}
         base = care_base_url(self.session.region)
-        response = self.http.get(f"{base}/v2/videos/list", params=params, headers=headers, timeout=30, verify=self.verify_tls)
+        response = _request_with_retries(lambda: self.http.get(f"{base}/v2/videos/list", params=params, headers=headers, timeout=30, verify=self.verify_tls))
         try:
             return _check_tapo_care_response(response)
         except TapoApiError:
             # Older libraries observed `/v1/videos`; retry once for compatibility.
-            response = self.http.get(f"{base}/v1/videos", params=params, headers=headers, timeout=30, verify=self.verify_tls)
+            response = _request_with_retries(lambda: self.http.get(f"{base}/v1/videos", params=params, headers=headers, timeout=30, verify=self.verify_tls))
             return _check_tapo_care_response(response)
 
     def iter_video_pages(
@@ -303,7 +328,7 @@ class TapoCareClient:
             page += 1
 
     def download_bytes(self, url: str) -> bytes:
-        response = self.http.get(url, timeout=120)
+        response = _request_with_retries(lambda: self.http.get(url, timeout=120))
         response.raise_for_status()
         return response.content
 

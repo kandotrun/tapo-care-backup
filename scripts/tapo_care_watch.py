@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import os
 
-from tapo_care_backup.api import TapoApiError
+from tapo_care_backup.api import TapoApiError, TRANSIENT_REQUEST_ERRORS
 from tapo_care_backup.monitor import format_slack_message, run_watch_once, settings_from_env
 
 
@@ -23,6 +23,10 @@ def main() -> int:
         message = format_slack_message(result, max_attachments=settings.max_attachments, notify_bootstrap=notify_bootstrap)
         if message:
             print(message)
+        return 0
+    except TRANSIENT_REQUEST_ERRORS:
+        # Tapo Care's private API can intermittently timeout. Stay silent so the
+        # next cron tick can retry without spamming Slack.
         return 0
     except TapoApiError as exc:
         print(f"⚠️ Tapo Care監視エラー: {exc}")

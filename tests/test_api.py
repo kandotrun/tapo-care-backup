@@ -1,5 +1,8 @@
+import requests
+
 from tapo_care_backup.api import TapoCareClient, TapoCloudClient
 from tapo_care_backup.config import StoredSession
+import tapo_care_backup.api as api
 
 
 def test_legacy_login_extracts_token_and_region(requests_mock):
@@ -52,6 +55,55 @@ def test_tapo_care_iter_video_pages_until_total_is_seen(requests_mock):
 
     assert [len(page["index"]) for page in pages] == [2, 1]
     assert [request.qs["page"] for request in matcher.request_history] == [["0"], ["1"]]
+
+
+def test_tapo_care_list_videos_retries_transient_timeout(requests_mock, monkeypatch):
+    monkeypatch.setattr(api.time, "sleep", lambda seconds: None)
+    session = StoredSession(token="tok_123", email="kan@example.com", region="aps1")
+    matcher = requests_mock.get(
+        "https://aps1-app-tapo-care.i.tplinknbu.com/v2/videos/list",
+        [
+            {"exc": requests.exceptions.ConnectTimeout("temporary connect timeout")},
+            {"json": {"total": 0, "index": []}},
+        ],
+    )
+
+    payload = TapoCareClient(session).list_videos("device-1")
+
+    assert payload == {"total": 0, "index": []}
+    assert matcher.call_count == 2
+
+
+def test_tapo_care_download_bytes_retries_transient_timeout(requests_mock, monkeypatch):
+    monkeypatch.setattr(api.time, "sleep", lambda seconds: None)
+    session = StoredSession(token="tok_123", email="kan@example.com", region="aps1")
+    matcher = requests_mock.get(
+        "https://media.example.test/clip.ts",
+        [
+            {"exc": requests.exceptions.ReadTimeout("temporary read timeout")},
+            {"content": b"video-bytes"},
+        ],
+    )
+
+    content = TapoCareClient(session).download_bytes("https://media.example.test/clip.ts")
+
+    assert content == b"video-bytes"
+    assert matcher.call_count == 2
+
+
+def test_list_devices_retries_transient_timeout(requests_mock, monkeypatch):
+    monkeypatch.setattr(api.time, "sleep", lambda seconds: None)
+    session = StoredSession(token="tok_123", email="kan@example.com", region="aps1")
+    matcher = requests_mock.post(
+        "https://eu-wap.tplinkcloud.com/",
+        [
+            {"exc": requests.exceptions.ConnectTimeout("temporary connect timeout")},
+            {"json": {"error_code": 0, "result": {"deviceList": []}}},
+        ],
+    )
+
+    assert TapoCloudClient().list_devices(session) == []
+    assert matcher.call_count == 2
 
 
 def test_list_devices_falls_back_to_signed_endpoint_when_legacy_token_is_rejected(requests_mock, monkeypatch):
